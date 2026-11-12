@@ -1,0 +1,44 @@
+# =============================================================================
+# نام ورک‌فلو
+# =============================================================================
+name: The Crypto Taxi - Cloud Fleet Runner
+
+on:
+  # امکان اجرا به صورت دستی از تب Actions و فراخوانی از طریق وب‌هوک / API (توسط cron-job.org)
+  workflow_dispatch:
+
+# =============================================================================
+# قفل هم‌زمانی (Concurrency)
+# جلوگیری قطعی از اجرای هم‌زمان دو ورک‌فلو روی ناوگان ۱۰ اکانته
+# =============================================================================
+concurrency:
+  group: crypto-taxi-fleet-runner
+  cancel-in-progress: false
+
+jobs:
+  run-taxi-fleet:
+    runs-on: ubuntu-latest
+    # سقف زمان کل اجرا: ۶ ساعت (کد پایتون رأس ۵ ساعت و ۵۰ دقیقه به آرامی بسته می‌شود)
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp
+
+      - name: Run Taxi Cloud Engine
+        env:
+          # چاپ بلادرنگ و خط‌به‌خط لاگ‌ها بدون بافر شدن در ترمینال گیت‌هاب
+          PYTHONUNBUFFERED: "1"
+          # سکرت حاوی متن کامل اطلاعات اکانت‌ها، هدرها، device_id و پراکسی‌ها
+          ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
+        run: python taxi_runner.py
