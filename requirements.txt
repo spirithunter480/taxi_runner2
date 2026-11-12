@@ -1,0 +1,4 @@
+aiohttp
+playwright
+telethon
+python-socks[asyncio]
