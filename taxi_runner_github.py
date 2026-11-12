@@ -17,6 +17,7 @@ ACCOUNTS_FILE = BASE_DIR / "accounts.json"
 
 ACCOUNT_WAKE_EVENTS = {}
 GLOBAL_FLEET_STATUS = {}
+OWNER_REVOKE_DEADLINES = {}
 BACKGROUND_TASKS = []
 
 CONNECTION_LOST = False
@@ -364,22 +365,40 @@ async def background_market_sniper(accounts):
         await asyncio.sleep(random.uniform(1.6, 2.8))
 
 async def background_auto_revoke_watcher(accounts):
-    """نظارت مداوم در پس‌زمینه و فسخ خودکار قراردادهای مستأجران در همان ثانیه‌ی رایگان شدن"""
-    await asyncio.sleep(25)  # تأخیر اولیه برای تثبیت رانرهای مسافرکشی
+    """نظارت هوشمند در پس‌زمینه: خواب ۲۰-۳۰ دقیقه‌ای در حالت عادی و بیدارباش دقیق در ثانیه فسخ رایگان"""
+    await asyncio.sleep(20)
+    next_check_ts = {}
+
+    # پخش کردن زمان اولین بررسی اکانت‌ها
+    for idx, acc in enumerate(accounts):
+        next_check_ts[acc.get("name", "Account")] = time.time() + (idx * random.uniform(3.0, 7.0))
+
     while True:
         try:
+            now_ts = time.time()
+            now_ms = int(now_ts * 1000)
+
             for acc in accounts:
                 tag = acc.get("name", "Account")
                 proxy = acc.get("proxy") or None
+
+                # بررسی اینکه آیا موعد چک دوره‌ای رسیده یا زمان فسخ یک قرارداد فرارسیده است
+                known_deadline_ms = OWNER_REVOKE_DEADLINES.get(tag)
+                deadline_due = (known_deadline_ms is not None) and (now_ms >= known_deadline_ms - 3000)
+                periodic_due = now_ts >= next_check_ts.get(tag, 0)
+
+                if not deadline_due and not periodic_due:
+                    continue
 
                 connector = aiohttp.TCPConnector(ssl=False)
                 async with aiohttp.ClientSession(headers=get_headers(acc), connector=connector) as session:
                     st = await safe_post(session, "state", proxy=proxy)
                     if not st or not st.get("me"):
+                        next_check_ts[tag] = time.time() + random.uniform(120, 240)
                         continue
 
                     my_id = str(st.get("me", {}).get("id", ""))
-                    now_ts = st.get("now", int(time.time() * 1000))
+                    srv_now_ms = st.get("now", int(time.time() * 1000))
 
                     owner_contracts = [
                         c for c in st.get("contracts", [])
@@ -387,10 +406,11 @@ async def background_auto_revoke_watcher(accounts):
                         and c.get("status") == "active"
                     ]
 
+                    earliest_future_ms = None
+
                     for c in owner_contracts:
                         free_revoke_at = c.get("freeRevokeAt") or 0
-                        # شرط قطعی رایگان بودن فسخ بدون ریسک کسر ۵ کش
-                        can_free = bool(c.get("freeRevoke") or (free_revoke_at > 0 and now_ts >= free_revoke_at))
+                        can_free = bool(c.get("freeRevoke") or (free_revoke_at > 0 and srv_now_ms >= free_revoke_at))
 
                         if can_free:
                             contract_id = str(c.get("id"))
@@ -407,32 +427,46 @@ async def background_auto_revoke_watcher(accounts):
                                     f"\n[{now_str}] 🚫 [AUTO-REVOKED SUCCESS] {tag} auto-revoked {shift} shift "
                                     f"from @{tenant} (Car: '{car_name}') [FREE / 0 Penalty]\n"
                                 )
-                                # بیدار کردن لوپ رانندگی در صورت آزاد شدن خودرو برای مسافرکشی شخصی
                                 wake_ev = ACCOUNT_WAKE_EVENTS.get(tag)
                                 if wake_ev:
                                     wake_ev.set()
                             else:
                                 err = (res.get("error") if isinstance(res, dict) else None) or "Failed"
                                 log_event(f"[{now_str}] ⚠️ [AUTO-REVOKE FAILED] {tag} ({shift} {car_name}) -> {err}")
+                                if earliest_future_ms is None:
+                                    earliest_future_ms = srv_now_ms + 60000
+                        else:
+                            if free_revoke_at > 0:
+                                if earliest_future_ms is None or free_revoke_at < earliest_future_ms:
+                                    earliest_future_ms = free_revoke_at
 
-                # فواصل ۲ ثانیه‌ای میان استعلام اکانت‌ها
-                await asyncio.sleep(2.0)
+                    OWNER_REVOKE_DEADLINES[tag] = earliest_future_ms
+                    idle_interval = random.uniform(1200.0, 1800.0)  # ۲۰ تا ۳۰ دقیقه
+
+                    if earliest_future_ms is not None:
+                        sec_until_revoke = max(5.0, (earliest_future_ms - srv_now_ms) / 1000.0 - 2.0)
+                        next_check_ts[tag] = time.time() + min(idle_interval, sec_until_revoke)
+                    else:
+                        next_check_ts[tag] = time.time() + idle_interval
+
+                await asyncio.sleep(random.uniform(1.5, 3.0))
 
         except asyncio.CancelledError:
             break
         except Exception:
             pass
 
-        # چک مجدد هر ۴۵ ثانیه
-        await asyncio.sleep(45)
+        await asyncio.sleep(10)
 
-async def run_taxi_for_account(acc, stagger_delay=0.0):
+async def run_taxi_for_account(acc, stagger_delay=0.0, account_index=0):
     tag = acc.get("name", "Account")
     proxy = acc.get("proxy") or None
     user_wake_event = ACCOUNT_WAKE_EVENTS.get(tag)
     last_driven_id = None
     last_mission_sync = 0
     current_rent_needed = 0
+    is_deep_idle = False
+    has_staggered_idle = False
 
     if stagger_delay > 0:
         await asyncio.sleep(stagger_delay)
@@ -440,6 +474,10 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
     connector = aiohttp.TCPConnector(ssl=False)
     async with aiohttp.ClientSession(headers=get_headers(acc), connector=connector) as session:
         while True:
+            # پاک کردن ایونت قبل از استعلام state تا هیچ سیگنال فسخ یا اسنایپی در حین اجرا از دست نرود
+            if user_wake_event:
+                user_wake_event.clear()
+
             state_data = await safe_post(session, "state", proxy=proxy)
             if not state_data or not state_data.get("me"):
                 check_connection_status(is_online=False)
@@ -452,8 +490,21 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
             now_ts = time.time()
             now_ms = int(now_ts * 1000)
 
-            # همگام‌سازی مأموریت‌های روزانه هر ۵ دقیقه
-            if now_ts - last_mission_sync > 300:
+            # همگام‌سازی زمان نزدیک‌ترین فسخ رایگان با دیده‌بان پس‌زمینه
+            earliest_revoke_ms = None
+            for c in state_data.get("contracts", []):
+                if c.get("status") == "active" and (str(c.get("ownerId")) == my_id or c.get("role") == "owner"):
+                    if c.get("freeRevoke"):
+                        earliest_revoke_ms = now_ms
+                        break
+                    fr_at = c.get("freeRevokeAt") or 0
+                    if fr_at > 0 and (earliest_revoke_ms is None or fr_at < earliest_revoke_ms):
+                        earliest_revoke_ms = fr_at
+            OWNER_REVOKE_DEADLINES[tag] = earliest_revoke_ms
+
+            # همگام‌سازی مأموریت‌های روزانه (در حالت فعال هر ۵ دقیقه، در حالت بیکاری هر ۲۵ دقیقه)
+            mission_sync_interval = 1500 if is_deep_idle else 300
+            if now_ts - last_mission_sync > mission_sync_interval:
                 m_data = await safe_post(session, "missions", proxy=proxy)
                 if m_data and isinstance(m_data.get("daily"), list):
                     for d in m_data["daily"]:
@@ -532,7 +583,7 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
                     "trip": active_trip if trip_ends > now_ms else None
                 })
 
-            # ۲. تاکسی‌های رنتی شیفت جاری (محاسبه دقیق قرارداد راننده)
+            # ۲. تاکسی‌های رنتی شیفت جاری
             for rc in driver_contracts:
                 rc_car_id = str(rc.get("carId"))
                 c_info = car_info_map.get(rc_car_id, {})
@@ -577,6 +628,7 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
             active_driving_car = next((car for car in fleet if car.get("trip")), None)
 
             if active_driving_car:
+                is_deep_idle = False
                 c_id = active_driving_car["id"]
                 c_tag = f"#{c_id[-4:]}" if len(c_id) >= 4 else f"#{c_id}"
                 c_type = active_driving_car["type"]
@@ -633,6 +685,7 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
             ready_cars = [c for c in fleet if c["trips_left"] > 0]
 
             if ready_cars:
+                is_deep_idle = False
                 ready_rented = [c for c in ready_cars if c["type"].startswith("RENTED")]
 
                 def sort_priority(x):
@@ -710,11 +763,41 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
                     err = trip_res.get("error") or trip_res.get("message") or "Unavailable"
                     log_event(f"[{now_str}] [{tag}] [Notice] {c_type} [{c_tag}] -> {err}")
 
-            sleep_time = random.randint(180, 300)
+            # --- محاسبه هوشمند زمان خواب (۳-۵ دقیقه در حالت فعال / ۲۰-۳۰ دقیقه در حالت اتمام سفرها) ---
+            total_trips_left = sum(c["trips_left"] for c in fleet)
+            now_str = datetime.now().strftime("%H:%M:%S")
+
+            if total_trips_left > 0:
+                # هنوز سفر باقی مانده (مثلاً به دلیل کول‌داون موقت شروع نشد) -> تایمر کوتاه ۳ تا ۵ دقیقه
+                is_deep_idle = False
+                sleep_time = random.randint(180, 300)
+            else:
+                # تمام سفرهای شیفت جاری به پایان رسیده -> خواب عمیق ۲۰ تا ۳۰ دقیقه
+                sleep_time = random.randint(1200, 1800)
+
+                # ایجاد فاصله پلکانی بین بیدارباش اکانت‌ها (~۱۵ دقیقه توزیع در کل ناوگان)
+                if not has_staggered_idle:
+                    sleep_time += (account_index % 10) * random.uniform(75.0, 105.0)
+                    has_staggered_idle = True
+
+                # جلوگیری از خوابیدن بیش از حد در نزدیکی تغییر شیفت (12:00 یا 00:00 UTC)
+                utc_curr = datetime.now(timezone.utc)
+                next_boundary_hour = 12 if utc_curr.hour < 12 else 24
+                sec_to_shift_change = ((next_boundary_hour - utc_curr.hour - 1) * 3600) + ((60 - utc_curr.minute - 1) * 60) + (60 - utc_curr.second)
+                if 0 < sec_to_shift_change < sleep_time:
+                    sleep_time = sec_to_shift_change + random.uniform(20.0, 240.0)
+
+                if not is_deep_idle:
+                    m_slp = int(sleep_time // 60)
+                    s_slp = int(sleep_time % 60)
+                    log_event(f"[{now_str}] [{tag}] 💤 All trips completed. Entering smart idle (~{m_slp}m {s_slp:02d}s)...")
+                is_deep_idle = True
+
             if user_wake_event:
-                user_wake_event.clear()
                 try:
                     await asyncio.wait_for(user_wake_event.wait(), timeout=sleep_time)
+                    # بیدار شدن فوری بر اثر فسخ خودرو یا شکار تاکسی جدید
+                    is_deep_idle = False
                     await asyncio.sleep(random.uniform(1.0, 3.5))
                 except asyncio.TimeoutError:
                     pass
@@ -1038,19 +1121,25 @@ async def cloud_main():
             idle_accounts.append(acc)
 
     random.shuffle(active_accounts)
-
     current_stagger = 0.0
-    for acc in active_accounts:
-        BACKGROUND_TASKS.append(asyncio.create_task(run_taxi_for_account(acc, current_stagger)))
+    for idx, acc in enumerate(active_accounts):
+        BACKGROUND_TASKS.append(asyncio.create_task(run_taxi_for_account(acc, current_stagger, account_index=idx)))
         current_stagger += random.uniform(20.0, 35.0)
 
+    # پخش کردن زمان بیدارباش اکانت‌های بیکار در بازه ~۱۵ تا ۲۰ دقیقه
     random.shuffle(idle_accounts)
-    for acc in idle_accounts:
-        BACKGROUND_TASKS.append(asyncio.create_task(run_taxi_for_account(acc, random.uniform(1.0, 3.0))))
+    idle_stagger = random.uniform(2.0, 12.0)
+    for idx, acc in enumerate(idle_accounts):
+        BACKGROUND_TASKS.append(asyncio.create_task(run_taxi_for_account(acc, idle_stagger, account_index=idx)))
+        idle_stagger += random.uniform(80.0, 130.0)
 
     if active_accounts:
         act_names = ", ".join(a.get("name") for a in active_accounts)
-        print(f"[*] Dispatched {len(active_accounts)} active account(s) (First starts immediately): [{act_names}]\n", flush=True)
+        print(f"[*] Dispatched {len(active_accounts)} active account(s) (First starts immediately): [{act_names}]", flush=True)
+
+    if idle_accounts:
+        idle_names = ", ".join(a.get("name") for a in idle_accounts)
+        print(f"[*] Staggered {len(idle_accounts)} idle account(s) across ~{int(idle_stagger // 60)}m window: [{idle_names}]\n", flush=True)
 
     print(">>> ALL WORKERS & BACKGROUND WATCHERS DISPATCHED. RUNNING IN CLOUD UNTIL TIMEOUT...", flush=True)
 
