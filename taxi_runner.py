@@ -119,7 +119,12 @@ async def safe_post(session, endpoint, payload=None, proxy=None):
     return None
 
 async def background_market_sniper(accounts):
-    """اسنایپر هوشمند دیده‌بان چرخشی مارکت رنت"""
+    """
+    اسنایپر هوشمند دیده‌بان چرخشی:
+    - اعتبارسنجی قطعی شیفت (سازگار با AM/PM و Morning/Afternoon)
+    - حفظ کامل تمامی فیلترها و حداقل سفرهای تعیین‌شده (بدون رنت شرایط بحرانی)
+    - ثبت دقیق سهمیه باقیمانده زنده و مدیریت ایمن اسلات‌ها
+    """
     current_scout = None
     scout_switch_time = time.time()
     session_duration = random.uniform(900.0, 1800.0)
@@ -129,12 +134,6 @@ async def background_market_sniper(accounts):
             now_ts = time.time()
             utc_now = datetime.now(timezone.utc)
             current_shift = "AM" if utc_now.hour < 12 else "PM"
-
-            if current_shift == "AM":
-                minutes_to_shift_end = (11 - utc_now.hour) * 60 + (60 - utc_now.minute)
-            else:
-                minutes_to_shift_end = (23 - utc_now.hour) * 60 + (60 - utc_now.minute)
-            hours_to_shift_end = minutes_to_shift_end / 60.0
 
             eligible_scouts = [
                 a for a in accounts
@@ -209,19 +208,18 @@ async def background_market_sniper(accounts):
                     text = f"{car_name} {model_id}".lower()
 
                     is_qualified = False
-                    is_rescue = False
 
-                    # رده ۱: سوپر لوکس
+                    # رده ۱: سوپر لوکس (2000, 2010, 2015, 2020, 2026)
                     if any(k in text for k in ["2000", "2010", "2015", "2020", "2026", "halloween", "modelo x"]):
                         if renter_pct >= 10 and daily_trips >= 1:
                             is_qualified = True
 
-                    # رده ۲: لوکس
+                    # رده ۲: لوکس (1950, 1990)
                     elif any(k in text for k in ["1950", "1990"]):
                         if (renter_pct >= 10 and daily_trips >= 2) or (renter_pct >= 15 and daily_trips >= 1):
                             is_qualified = True
 
-                    # رده ۳: نیمه‌لوکس
+                    # رده ۳: نیمه‌لوکس (1900, 1930, 2025)
                     elif any(k in text for k in ["1900", "1930", "2025", "influencer"]):
                         if (
                             (renter_pct >= 50 and daily_trips >= 1) or
@@ -232,7 +230,7 @@ async def background_market_sniper(accounts):
                         ):
                             is_qualified = True
 
-                    # رده ۴: اقتصادی بالا
+                    # رده ۴: اقتصادی بالا (1880, 2016)
                     elif any(k in text for k in ["1880", "2016", "cheap"]):
                         if (
                             (renter_pct >= 50 and daily_trips >= 2) or
@@ -243,7 +241,7 @@ async def background_market_sniper(accounts):
                         ):
                             is_qualified = True
 
-                    # رده ۵: اقتصادی متوسط
+                    # رده ۵: اقتصادی متوسط (1850)
                     elif "1850" in text:
                         if (
                             (renter_pct >= 70 and daily_trips >= 2) or
@@ -257,37 +255,20 @@ async def background_market_sniper(accounts):
                     # رده ۶: اقتصادی پایه (۱۸۳۰)
                     elif "1830" in text:
                         if (
-                            (renter_pct >= 70 and daily_trips >= 3) or
-                            (renter_pct >= 50 and daily_trips >= 4) or
-                            (renter_pct >= 40 and daily_trips >= 5) or
-                            (renter_pct >= 30 and daily_trips >= 7) or
-                            (renter_pct >= 20 and daily_trips >= 10)
+                            (renter_pct >= 80 and daily_trips >= 3) or
+                            (renter_pct >= 60 and daily_trips >= 4) or
+                            (renter_pct >= 50 and daily_trips >= 5) or
+                            (renter_pct >= 30 and daily_trips >= 7)
                         ):
                             is_qualified = True
 
-                    # رده ۷: استاندارد (۱۸۰۰)
+                    # رده ۷: استاندارد (۱۸۰۰) - فقط شرایط عادی
                     elif "1800" in text:
                         if (
                             (renter_pct >= 80 and daily_trips >= 5) or
                             (renter_pct >= 50 and daily_trips >= 8)
                         ):
                             is_qualified = True
-                        elif hours_to_shift_end <= 4.0 and shift == current_shift:
-                            meets_rescue_terms = (
-                                (renter_pct >= 50 and daily_trips >= 5) or
-                                (renter_pct >= 40 and daily_trips >= 6) or
-                                (renter_pct >= 30 and daily_trips >= 8)
-                            )
-                            if meets_rescue_terms and market_avail_today > 0:
-                                valid_rescue_targets = [
-                                    a for a in accounts
-                                    if GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get(shift, 0) < 2
-                                    and 0 < GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("rent_needed", 0) <= market_avail_today
-                                    and (GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("rent_needed", 0) * 18) <= minutes_to_shift_end
-                                ]
-                                if valid_rescue_targets:
-                                    is_qualified = True
-                                    is_rescue = True
 
                     if is_qualified:
                         candidates = [
@@ -297,22 +278,12 @@ async def background_market_sniper(accounts):
 
                         if candidates:
                             random.shuffle(candidates)
-                            if is_rescue:
-                                candidates.sort(key=lambda a: (
-                                    0 if (
-                                        0 < GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("rent_needed", 0) <= market_avail_today
-                                        and (GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("rent_needed", 0) * 18) <= minutes_to_shift_end
-                                    ) else 1,
-                                    -GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("rent_needed", 0),
-                                    GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("AM", 0) + GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("PM", 0)
-                                ))
-                            else:
-                                candidates.sort(key=lambda a: (
-                                    0 if (GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("rent_needed", 0) > 0 and shift == current_shift) else 1,
-                                    -GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("rent_needed", 0) if shift == current_shift else 0,
-                                    GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get(shift, 0),
-                                    GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("AM", 0) + GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("PM", 0)
-                                ))
+                            candidates.sort(key=lambda a: (
+                                0 if (GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("rent_needed", 0) > 0 and shift == current_shift) else 1,
+                                -GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("rent_needed", 0) if shift == current_shift else 0,
+                                GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get(shift, 0),
+                                GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("AM", 0) + GLOBAL_FLEET_STATUS.get(a.get("name"), {}).get("PM", 0)
+                            ))
 
                             eligible_acc = candidates[0]
                             t_proxy = eligible_acc.get("proxy") or None
@@ -327,7 +298,6 @@ async def background_market_sniper(accounts):
                                         GLOBAL_FLEET_STATUS[c_name][shift] += 1
 
                                     total_rented = GLOBAL_FLEET_STATUS.get(c_name, {}).get("AM", 0) + GLOBAL_FLEET_STATUS.get(c_name, {}).get("PM", 0)
-                                    tag_label = "RESCUE SNIPE" if is_rescue else "SNIPE SUCCESS"
 
                                     res_car = rent_res.get("car") if isinstance(rent_res.get("car"), dict) else {}
                                     res_contract = rent_res.get("contract") if isinstance(rent_res.get("contract"), dict) else {}
@@ -346,7 +316,7 @@ async def background_market_sniper(accounts):
                                     else:
                                         left_count = market_avail_today
 
-                                    log_event(f"\n[{now_str}] 🎯 [{tag_label}] {c_name} rented '{car_name}' ({shift}) from @{owner_name}")
+                                    log_event(f"\n[{now_str}] 🎯 [SNIPE SUCCESS] {c_name} rented '{car_name}' ({shift}) from @{owner_name}")
                                     log_event(f"           ↳ Trips: {daily_trips}/d ({left_count} left) | Driver: {renter_pct}% | Net: ~{trip_profit:.4f} USDT/trip | Est: ~{est_week:.2f} USDT/wk | [{total_rented}/4 Rented]\n")
 
                                     wake_events = globals().get("ACCOUNT_WAKE_EVENTS")
@@ -358,7 +328,7 @@ async def background_market_sniper(accounts):
                                     await asyncio.sleep(2)
                                     break
                                 else:
-                                    log_event(f"\n[{now_str}] ⚠️ [SNIPE MISSED] '{car_name}' ({shift}) from @{owner_name} | {daily_trips} trips/d | Driver: {renter_pct}% (Already taken)\n")
+                                    log_event(f"\n[{now_str}] ⚠️ [SNIPE MISSED] '{car_name}' ({shift}) from @{owner_name} | {daily_trips} trips/d | Driver: {renter_pct}% (Already taken by another player)\n")
         except Exception:
             pass
 
