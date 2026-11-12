@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import aiohttp
 
-# محدودیت زمان اجرا: ۵ ساعت و ۵۰ دقیقه (به ثانیه)
+# سقف زمان کل اجرا: ۵ ساعت و ۵۰ دقیقه (به ثانیه)
 MAX_RUNTIME_SECONDS = (5 * 60 + 50) * 60  # 21,000 Seconds
 
 BASE_URL = "https://thecryptotaxi.com"
@@ -42,7 +42,6 @@ def log_event(msg):
     """چاپ زنده رویدادها در کنسول بدون بافر"""
     print(msg, flush=True)
 
-# میانگین درآمد پایه هر سفر بر اساس اطلاعات Dealership
 CAR_BASE_EARNINGS = {
     "1800": 0.015,
     "1830": 0.024,
@@ -211,17 +210,17 @@ async def background_market_sniper(accounts):
                     is_qualified = False
                     is_rescue = False
 
-                    # رده ۱: سوپر لوکس (2000, 2010, 2015, 2020, 2026)
+                    # رده ۱: سوپر لوکس
                     if any(k in text for k in ["2000", "2010", "2015", "2020", "2026", "halloween", "modelo x"]):
                         if renter_pct >= 10 and daily_trips >= 1:
                             is_qualified = True
 
-                    # رده ۲: لوکس (1950, 1990)
+                    # رده ۲: لوکس
                     elif any(k in text for k in ["1950", "1990"]):
                         if (renter_pct >= 10 and daily_trips >= 2) or (renter_pct >= 15 and daily_trips >= 1):
                             is_qualified = True
 
-                    # رده ۳: نیمه‌لوکس (1900, 1930, 2025)
+                    # رده ۳: نیمه‌لوکس
                     elif any(k in text for k in ["1900", "1930", "2025", "influencer"]):
                         if (
                             (renter_pct >= 50 and daily_trips >= 1) or
@@ -232,7 +231,7 @@ async def background_market_sniper(accounts):
                         ):
                             is_qualified = True
 
-                    # رده ۴: اقتصادی بالا (1880, 2016)
+                    # رده ۴: اقتصادی بالا
                     elif any(k in text for k in ["1880", "2016", "cheap"]):
                         if (
                             (renter_pct >= 50 and daily_trips >= 2) or
@@ -243,7 +242,7 @@ async def background_market_sniper(accounts):
                         ):
                             is_qualified = True
 
-                    # رده ۵: اقتصادی متوسط (1850)
+                    # رده ۵: اقتصادی متوسط
                     elif "1850" in text:
                         if (
                             (renter_pct >= 70 and daily_trips >= 2) or
@@ -269,8 +268,7 @@ async def background_market_sniper(accounts):
                     elif "1800" in text:
                         if (
                             (renter_pct >= 80 and daily_trips >= 5) or
-                            (renter_pct >= 50 and daily_trips >= 8) or
-                            (renter_pct >= 40 and daily_trips >= 10)
+                            (renter_pct >= 50 and daily_trips >= 8)
                         ):
                             is_qualified = True
                         elif hours_to_shift_end <= 4.0 and shift == current_shift:
@@ -365,6 +363,69 @@ async def background_market_sniper(accounts):
 
         await asyncio.sleep(random.uniform(1.6, 2.8))
 
+async def background_auto_revoke_watcher(accounts):
+    """نظارت مداوم در پس‌زمینه و فسخ خودکار قراردادهای مستأجران در همان ثانیه‌ی رایگان شدن"""
+    await asyncio.sleep(25)  # تأخیر اولیه برای تثبیت رانرهای مسافرکشی
+    while True:
+        try:
+            for acc in accounts:
+                tag = acc.get("name", "Account")
+                proxy = acc.get("proxy") or None
+
+                connector = aiohttp.TCPConnector(ssl=False)
+                async with aiohttp.ClientSession(headers=get_headers(acc), connector=connector) as session:
+                    st = await safe_post(session, "state", proxy=proxy)
+                    if not st or not st.get("me"):
+                        continue
+
+                    my_id = str(st.get("me", {}).get("id", ""))
+                    now_ts = st.get("now", int(time.time() * 1000))
+
+                    owner_contracts = [
+                        c for c in st.get("contracts", [])
+                        if (str(c.get("ownerId")) == my_id or c.get("role") == "owner")
+                        and c.get("status") == "active"
+                    ]
+
+                    for c in owner_contracts:
+                        free_revoke_at = c.get("freeRevokeAt") or 0
+                        # شرط قطعی رایگان بودن فسخ بدون ریسک کسر ۵ کش
+                        can_free = bool(c.get("freeRevoke") or (free_revoke_at > 0 and now_ts >= free_revoke_at))
+
+                        if can_free:
+                            contract_id = str(c.get("id"))
+                            car_name = c.get("name", "Taxi")
+                            shift = c.get("shift", "---")
+                            tenant = c.get("renterName") or c.get("otherName") or c.get("username") or "Player"
+
+                            payload = {"contractId": contract_id, "free": True}
+                            res = await safe_post(session, "contracts/revoke", payload, proxy=proxy)
+                            now_str = datetime.now().strftime("%H:%M:%S")
+
+                            if res and (res.get("free") or res.get("contract", {}).get("status") == "revoked" or res.get("success")):
+                                log_event(
+                                    f"\n[{now_str}] 🚫 [AUTO-REVOKED SUCCESS] {tag} auto-revoked {shift} shift "
+                                    f"from @{tenant} (Car: '{car_name}') [FREE / 0 Penalty]\n"
+                                )
+                                # بیدار کردن لوپ رانندگی در صورت آزاد شدن خودرو برای مسافرکشی شخصی
+                                wake_ev = ACCOUNT_WAKE_EVENTS.get(tag)
+                                if wake_ev:
+                                    wake_ev.set()
+                            else:
+                                err = (res.get("error") if isinstance(res, dict) else None) or "Failed"
+                                log_event(f"[{now_str}] ⚠️ [AUTO-REVOKE FAILED] {tag} ({shift} {car_name}) -> {err}")
+
+                # فواصل ۲ ثانیه‌ای میان استعلام اکانت‌ها
+                await asyncio.sleep(2.0)
+
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+
+        # چک مجدد هر ۴۵ ثانیه
+        await asyncio.sleep(45)
+
 async def run_taxi_for_account(acc, stagger_delay=0.0):
     tag = acc.get("name", "Account")
     proxy = acc.get("proxy") or None
@@ -385,7 +446,6 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
                 await asyncio.sleep(20)
                 continue
 
-            # اگر ارتباط پیش‌تر قطع بود و الان داده دریافت شد، پیام وصل مجدد ثبت می‌شود
             check_connection_status(is_online=True)
 
             my_id = str(state_data.get("me", {}).get("id", ""))
@@ -472,19 +532,17 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
                     "trip": active_trip if trip_ends > now_ms else None
                 })
 
-            # ۲. تاکسی‌های رنتی شیفت جاری با محاسبه دقیق قرارداد راننده
+            # ۲. تاکسی‌های رنتی شیفت جاری (محاسبه دقیق قرارداد راننده)
             for rc in driver_contracts:
                 rc_car_id = str(rc.get("carId"))
                 c_info = car_info_map.get(rc_car_id, {})
                 car_raw_left = c_info.get("car_quota_left", 0)
 
-                # سقف روزانه مجاز قرارداد
                 raw_d = rc.get("dailyTrips") or rc.get("tripsPerDay") or rc.get("trips") or 0
                 if isinstance(raw_d, dict):
                     raw_d = raw_d.get("left", 0)
                 rc_daily = int(raw_d) if str(raw_d).isdigit() else 0
 
-                # سفرهای انجام‌شده توسط من در این قرارداد
                 rc_used = rc.get("todayTrips")
                 if rc_used is None:
                     rc_used = rc.get("tripsToday")
@@ -494,7 +552,6 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
                     rc_used = c_info.get("quota_used", 0)
                 rc_used = int(rc_used) if str(rc_used).isdigit() else 0
 
-                # سهمیه واقعی باقیمانده قرارداد من
                 rc_quota = max(0, rc_daily - rc_used)
                 if car_raw_left is not None:
                     rc_quota = min(rc_quota, int(car_raw_left))
@@ -534,7 +591,6 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
 
                 await asyncio.sleep(wait_s + random.randint(2, 4))
 
-                # تلاش تا ۲ بار برای دریافت وضعیت معتبر پس از سفر جهت جلوگیری از لاگ بدون Bal و Cash
                 post_state = None
                 for _ in range(2):
                     post_state = await safe_post(session, "state", proxy=proxy)
@@ -582,14 +638,9 @@ async def run_taxi_for_account(acc, stagger_delay=0.0):
                 def sort_priority(x):
                     is_rented = x["type"].startswith("RENTED")
                     if is_rented:
-                        # ۱. تمام رنتی‌ها در اولویت اول (گروه 0)
-                        # ۲. تناوب یک‌درمیان بین خودروهای رنتی آماده
                         repeat_penalty = 1 if (x["id"] == last_driven_id and len(ready_rented) > 1) else 0
-                        # ۳. سود بیشتر در صورت تساوی
                         return (0, repeat_penalty, -x["trip_profit"])
                     else:
-                        # ۱. خودروهای شخصی پس از صفر شدن رنتی‌ها (گروه 1)
-                        # ۲. اولویت با خودروی شخصی دارای بیشترین سود
                         return (1, 0, -x["trip_profit"])
 
                 ready_cars.sort(key=sort_priority)
@@ -957,8 +1008,9 @@ async def cloud_main():
     for acc in valid_accounts:
         ACCOUNT_WAKE_EVENTS[acc.get("name")] = asyncio.Event()
 
-    # شروع اسنایپر در پس‌زمینه
+    # تسک‌های پس‌زمینه: اسنایپر و دیده‌بان فسخ رایگان خودکار
     BACKGROUND_TASKS.append(asyncio.create_task(background_market_sniper(valid_accounts)))
+    BACKGROUND_TASKS.append(asyncio.create_task(background_auto_revoke_watcher(valid_accounts)))
 
     # دسته‌بندی اکانت‌ها بر اساس داشتن سفر آماده
     utc_now = datetime.now(timezone.utc)
@@ -987,7 +1039,6 @@ async def cloud_main():
 
     random.shuffle(active_accounts)
 
-    # اکانت اول بدون معطلی و بقیه با فواصل تصادفی طبیعی شروع می‌کنند
     current_stagger = 0.0
     for acc in active_accounts:
         BACKGROUND_TASKS.append(asyncio.create_task(run_taxi_for_account(acc, current_stagger)))
@@ -1001,9 +1052,8 @@ async def cloud_main():
         act_names = ", ".join(a.get("name") for a in active_accounts)
         print(f"[*] Dispatched {len(active_accounts)} active account(s) (First starts immediately): [{act_names}]\n", flush=True)
 
-    print(">>> ALL WORKERS DISPATCHED. RUNNING IN CLOUD UNTIL TIMEOUT...", flush=True)
+    print(">>> ALL WORKERS & BACKGROUND WATCHERS DISPATCHED. RUNNING IN CLOUD UNTIL TIMEOUT...", flush=True)
 
-    # نگه‌داشتن اجرا تا سقف ۵ ساعت و ۵۰ دقیقه
     try:
         await asyncio.sleep(MAX_RUNTIME_SECONDS)
         print(f"\n[⏱️] Reached maximum cloud runtime of 5h 50m ({MAX_RUNTIME_SECONDS}s).", flush=True)
