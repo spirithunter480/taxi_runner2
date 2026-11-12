@@ -257,10 +257,11 @@ async def background_market_sniper(accounts):
                     # رده ۶: اقتصادی پایه (۱۸۳۰)
                     elif "1830" in text:
                         if (
-                            (renter_pct >= 80 and daily_trips >= 3) or
-                            (renter_pct >= 60 and daily_trips >= 4) or
-                            (renter_pct >= 50 and daily_trips >= 5) or
-                            (renter_pct >= 30 and daily_trips >= 7)
+                            (renter_pct >= 70 and daily_trips >= 3) or
+                            (renter_pct >= 50 and daily_trips >= 4) or
+                            (renter_pct >= 40 and daily_trips >= 5) or
+                            (renter_pct >= 30 and daily_trips >= 7) or
+                            (renter_pct >= 20 and daily_trips >= 10)
                         ):
                             is_qualified = True
 
