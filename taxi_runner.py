@@ -685,6 +685,23 @@ async def run_taxi_for_account(acc, stagger_delay=0.0, account_index=0):
             ready_cars = [c for c in fleet if c["trips_left"] > 0]
 
             if ready_cars:
+                # بررسی زمان باقیمانده تا پایان شیفت: اگر <= 15 دقیقه (900 ثانیه) مانده باشد، سفر جدید شروع نمی‌شود
+                utc_curr = datetime.now(timezone.utc)
+                next_boundary_hour = 12 if utc_curr.hour < 12 else 24
+                sec_to_shift_change = ((next_boundary_hour - utc_curr.hour - 1) * 3600) + ((60 - utc_curr.minute - 1) * 60) + (60 - utc_curr.second)
+
+                if 0 < sec_to_shift_change <= 900:
+                    shift_wait = sec_to_shift_change + random.uniform(300.0, 900.0)  # بیدارباش تصادفی ۵ تا ۱۵ دقیقه بعد از تغییر شیفت
+                    now_str = datetime.now().strftime("%H:%M:%S")
+                    m_left = int(sec_to_shift_change // 60)
+                    s_left = int(sec_to_shift_change % 60)
+                    m_wake = int(shift_wait // 60)
+                    log_event(f"[{now_str}] [{tag}] ⏸️ Shift ending in {m_left}m {s_left:02d}s (≤ 15m). Waiting for next shift (~{m_wake}m)...")
+                    is_deep_idle = True
+                    await asyncio.sleep(shift_wait)
+                    is_deep_idle = False
+                    continue
+
                 is_deep_idle = False
                 ready_rented = [c for c in ready_cars if c["type"].startswith("RENTED")]
 
@@ -760,7 +777,18 @@ async def run_taxi_for_account(acc, stagger_delay=0.0, account_index=0):
                     await asyncio.sleep(random.randint(20, 50))
                     continue
                 else:
-                    err = trip_res.get("error") or trip_res.get("message") or "Unavailable"
+                    err_code = trip_res.get("code") if isinstance(trip_res, dict) else None
+                    err = (trip_res.get("error") or trip_res.get("message") or "Unavailable") if isinstance(trip_res, dict) else "Unavailable"
+                    if err_code == "shift_ending":
+                        utc_curr = datetime.now(timezone.utc)
+                        next_boundary_hour = 12 if utc_curr.hour < 12 else 24
+                        sec_to_shift_change = ((next_boundary_hour - utc_curr.hour - 1) * 3600) + ((60 - utc_curr.minute - 1) * 60) + (60 - utc_curr.second)
+                        shift_wait = max(60.0, sec_to_shift_change) + random.uniform(300.0, 900.0)
+                        log_event(f"[{now_str}] [{tag}] ⏸️ Shift ending soon. Sleeping until next shift (~{int(shift_wait // 60)}m)...")
+                        is_deep_idle = True
+                        await asyncio.sleep(shift_wait)
+                        is_deep_idle = False
+                        continue
                     log_event(f"[{now_str}] [{tag}] [Notice] {c_type} [{c_tag}] -> {err}")
 
             # --- محاسبه هوشمند زمان خواب (۳-۵ دقیقه در حالت فعال / ۲۰-۳۰ دقیقه در حالت اتمام سفرها) ---
@@ -780,12 +808,12 @@ async def run_taxi_for_account(acc, stagger_delay=0.0, account_index=0):
                     sleep_time += (account_index % 10) * random.uniform(75.0, 105.0)
                     has_staggered_idle = True
 
-                # جلوگیری از خوابیدن بیش از حد در نزدیکی تغییر شیفت (12:00 یا 00:00 UTC)
+                # بیدارباش در شیفت بعدی بین ۵ تا ۱۵ دقیقه پس از 12:00 یا 00:00 UTC
                 utc_curr = datetime.now(timezone.utc)
                 next_boundary_hour = 12 if utc_curr.hour < 12 else 24
                 sec_to_shift_change = ((next_boundary_hour - utc_curr.hour - 1) * 3600) + ((60 - utc_curr.minute - 1) * 60) + (60 - utc_curr.second)
                 if 0 < sec_to_shift_change < sleep_time:
-                    sleep_time = sec_to_shift_change + random.uniform(20.0, 240.0)
+                    sleep_time = sec_to_shift_change + random.uniform(300.0, 900.0)
 
                 if not is_deep_idle:
                     m_slp = int(sleep_time // 60)
