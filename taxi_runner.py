@@ -567,13 +567,6 @@ async def run_taxi_for_account(acc, stagger_delay=0.0, account_index=0):
                 car_name = rc.get("name", "Rented Taxi")
                 model_id_str = str(rc.get("modelId", ""))
 
-                # ==========================================================================
-                # [TEMP START] شروع بخش موقت: عدم رانندگی با تاکسی‌های 1800 زیر ۵ سفر (بعداً پاک شود)
-                if "1800" in f"{car_name} {model_id_str}".lower() and 0 < rc_daily < 5:
-                    continue
-                # [TEMP END] پایان بخش موقت
-                # ==========================================================================
-
                 rc_used = rc.get("todayTrips")
                 if rc_used is None:
                     rc_used = rc.get("tripsToday")
