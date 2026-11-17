@@ -1038,39 +1038,58 @@ async def fetch_account_full_data(acc):
         }
 
 def render_startup_dashboard(results):
-    W = 114
+    W = 122
     valid_r = [r for r in results if not r.get("error")]
 
     print("\n" + "=" * W, flush=True)
     print(">>> THE CRYPTO TAXI - CLOUD RUNNER DASHBOARD", flush=True)
     print("=" * W, flush=True)
-    print(f"{'Account':^10} | {'User':^12} | {'USDT':^8} | {'Cash':^6} | {'Cars':^6} | {'Own Taxi':^17} | {'Rented AM':^17} | {'Rented PM':^17}", flush=True)
+    print(f"{'Account':^10} | {'User':^12} | {'USDT':^8} | {'Cash':^6} | {'Total':^8} | {'Cars':^4} | {'Own Taxi':^16} | {'Rented AM':^17} | {'Rented PM':^17}", flush=True)
     print("-" * W, flush=True)
 
     for r in results:
         if r.get("error"):
-            print(f"{r.get('acc', 'Acc'):<10} | {'-- Connection Error --':^101}", flush=True)
+            print(f"{r.get('acc', 'Acc'):<10} | {'-- Connection Error --':^109}", flush=True)
             continue
         usdt_str = f"{r['usdt']:.4f}"
         cash_str = f"{r['cash']:.2f}"
-        print(f"{r['acc']:<10} | {r['user']:<12} | {usdt_str:^8} | {cash_str:^6} | {r['cars_count']:^6} | {r['own_taxi_str']:^17} | {r['rented_am_str']:^17} | {r['rented_pm_str']:^17}", flush=True)
+        total_str = f"{(r['usdt'] + r['cash']):.4f}"
+        print(f"{r['acc']:<10} | {r['user']:<12} | {usdt_str:^8} | {cash_str:^6} | {total_str:^8} | {r['cars_count']:^4} | {r['own_taxi_str']:^16} | {r['rented_am_str']:^17} | {r['rented_pm_str']:^17}", flush=True)
 
     if valid_r:
+        dash_shift = valid_r[0].get("current_shift")
         total_usdt = sum(r["usdt"] for r in valid_r)
         total_cash = sum(r["cash"] for r in valid_r)
+        grand_total = total_usdt + total_cash
         total_cars = sum(r["cars_count"] for r in valid_r)
         total_own_left = sum(r.get("own_left_num", 0) for r in valid_r)
         total_am_count = sum(r.get("in_am_count", 0) for r in valid_r)
         total_am_left = sum(r.get("in_am_left", 0) for r in valid_r)
+        total_am_used = sum(r.get("in_am_used", 0) for r in valid_r)
         total_pm_count = sum(r.get("in_pm_count", 0) for r in valid_r)
         total_pm_left = sum(r.get("in_pm_left", 0) for r in valid_r)
 
         own_sum_str = f"{total_own_left} left"
-        am_sum_str = f"{total_am_count}/{len(valid_r)*2} ({total_am_left:>2} left )"
-        pm_sum_str = f"{total_pm_count}/{len(valid_r)*2} ({total_pm_left:>2} left )"
+        if dash_shift == "AM":
+            am_sum_str = f"{total_am_count}/{len(valid_r)*2} ({total_am_left:>2} left )"
+            pm_sum_str = f"{total_pm_count}/{len(valid_r)*2} ({total_pm_left:>2} next )"
+        elif dash_shift == "PM":
+            if total_am_left > 0:
+                am_sum_str = f"{total_am_count}/{len(valid_r)*2} ({total_am_left:>2} miss )"
+            else:
+                am_sum_str = f"{total_am_count}/{len(valid_r)*2} ({total_am_used:>2} done )"
+            pm_sum_str = f"{total_pm_count}/{len(valid_r)*2} ({total_pm_left:>2} left )"
+        else:
+            am_sum_str = f"{total_am_count}/{len(valid_r)*2} ({total_am_left:>2} left )"
+            pm_sum_str = f"{total_pm_count}/{len(valid_r)*2} ({total_pm_left:>2} left )"
+
+        accs_sum_str = f"{len(valid_r)} Accs"
+        usdt_sum_str = f"{total_usdt:.4f}"
+        cash_sum_str = f"{total_cash:.2f}"
+        grand_sum_str = f"{grand_total:.4f}"
 
         print("-" * W, flush=True)
-        print(f"{'SUM':<10} | {f'{len(valid_r)} Accs':<12} | {f'{total_usdt:.4f}':^8} | {f'{total_cash:.2f}':^6} | {total_cars:^6} | {own_sum_str:^17} | {am_sum_str:^17} | {pm_sum_str:^17}", flush=True)
+        print(f"{'SUM':<10} | {accs_sum_str:<12} | {usdt_sum_str:^8} | {cash_sum_str:^6} | {grand_sum_str:^8} | {total_cars:^4} | {own_sum_str:^16} | {am_sum_str:^17} | {pm_sum_str:^17}", flush=True)
     print("=" * W + "\n", flush=True)
 
 async def cloud_main():
